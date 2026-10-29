@@ -47,12 +47,8 @@ export class AppService {
       'Content-Type': 'application/json',
     };
 
-    this.auth()
-      .then(async () => {
-        await this.setWebhookSettings();
-        console.log(await this.getWebhookSettings());
-        await this.syncData();
-      })
+    this.refreshTokenAndWebhookSettings()
+      .then(() => this.syncData())
       .catch((error) => {
         console.error(
           'App initialization failed:',
@@ -64,9 +60,9 @@ export class AppService {
     // Refresh a little earlier - every 55 minutes.
     setInterval(
       () => {
-        this.auth().catch((error) => {
+        this.refreshTokenAndWebhookSettings().catch((error) => {
           console.error(
-            'Scheduled iiko auth failed:',
+            'Scheduled iiko auth or webhook update failed:',
             error.response?.data || error.message,
           );
         });
@@ -80,6 +76,11 @@ export class AppService {
       },
       1000 * 60 * 15,
     );
+  }
+
+  private async refreshTokenAndWebhookSettings() {
+    await this.auth();
+    await this.setWebhookSettings();
   }
 
   private scheduleSyncData(delay = this.WEBHOOK_SYNC_DELAY) {
@@ -659,6 +660,8 @@ export class AppService {
         },
       }),
     };
+
+    console.log('Updating webhook settings after token refresh');
 
     const response =
       await this.makeAuthenticatedRequest(config);
