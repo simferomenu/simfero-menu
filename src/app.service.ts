@@ -23,6 +23,14 @@ export class AppService {
 
   public webHookURL;
 
+  private syncDataPromise: Promise<any> | null = null;
+
+  private syncDataTimeout: NodeJS.Timeout | null = null;
+
+  private lastKnownTables: any[] | null = null;
+
+  private readonly WEBHOOK_SYNC_DELAY = 60_000;
+
   constructor(
     private configService: ConfigService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
@@ -39,32 +47,55 @@ export class AppService {
       'Content-Type': 'application/json',
     };
 
-    this.auth().then(async () => {
-      try {
+    this.auth()
+      .then(async () => {
         await this.setWebhookSettings();
         console.log(await this.getWebhookSettings());
         await this.syncData();
-      } catch (error) {
-        console.log('App init sync error: ', error);
-      }
-    });
-
-    // iiko token lives for 1 hour.
-    // Refresh a little earlier - every 55 minutes.
-    setInterval(() => {
-      this.auth().catch((error) => {
+      })
+      .catch((error) => {
         console.error(
-          'Scheduled iiko auth failed:',
+          'App initialization failed:',
           error.response?.data || error.message,
         );
       });
-    }, 1000 * 60 * 55);
 
-    try {
-      setInterval(() => this.syncData(), 1000 * 60 * 15);
-    } catch (error) {
-      console.log('App init sync error on interval: ', error);
+    // iiko token lives for 1 hour.
+    // Refresh a little earlier - every 55 minutes.
+    setInterval(
+      () => {
+        this.auth().catch((error) => {
+          console.error(
+            'Scheduled iiko auth failed:',
+            error.response?.data || error.message,
+          );
+        });
+      },
+      1000 * 60 * 55,
+    );
+
+    setInterval(
+      () => {
+        this.scheduleSyncData(0);
+      },
+      1000 * 60 * 15,
+    );
+  }
+
+  private scheduleSyncData(delay = this.WEBHOOK_SYNC_DELAY) {
+    if (this.syncDataTimeout) {
+      return;
     }
+
+    this.syncDataTimeout = setTimeout(() => {
+      this.syncDataTimeout = null;
+      this.syncData().catch((error) => {
+        console.error(
+          'Scheduled data sync failed:',
+          error.response?.data || error.message,
+        );
+      });
+    }, delay);
   }
 
   private authPromise: Promise<void> | null = null;
@@ -122,6 +153,7 @@ export class AppService {
       const config = {
         method: 'post',
         url: `${this.apiURL}/v2/access_token`,
+        timeout: 15000,
         headers: this.defaultHeaders,
         data: {
           appId: this.appId,
@@ -165,7 +197,10 @@ export class AppService {
     }
 
     try {
-      const response = await axios(requestConfig);
+      const response = await axios({
+        timeout: 30000,
+        ...requestConfig,
+      });
       return response;
     } catch (error) {
       // Only retry on 401 Unauthorized, and only once
@@ -243,88 +278,123 @@ export class AppService {
     return response.data.terminalGroups[0].items[0];
   }
 
-  async getTables() {
-    // Cache key for tables data
-    const cacheKey = 'tables:list';
+  private async getStaleTables(): Promise<any[] | null> {
+    try {
+      const staleData = await this.cacheManager.get<any[]>('tables:list:stale');
 
-    // Try to get cached data from Redis
-    const cachedData =
-      await this.cacheManager.get(cacheKey);
+      if (staleData) {
+        this.lastKnownTables = staleData;
+        console.warn('Returning stale tables data from Redis');
+        return staleData;
+      }
+    } catch (error) {
+      console.error('Unable to read stale tables cache:', error.message);
+    }
+
+    if (this.lastKnownTables) {
+      console.warn('Returning last known tables data from memory');
+    }
+
+    return this.lastKnownTables;
+  }
+
+  async getTables() {
+    const cacheKey = 'tables:list';
+    let cachedData: any[] | undefined;
+
+    try {
+      cachedData = await this.cacheManager.get<any[]>(cacheKey);
+    } catch (error) {
+      console.error('Unable to read tables cache:', error.message);
+    }
 
     if (cachedData) {
-      // If cached data exists, return it immediately
+      this.lastKnownTables = cachedData;
       console.log('Returning cached tables data');
-
       return cachedData;
     }
 
-    // If no cached data, process the request with regular flow
-    console.log(
-      'Cache miss, fetching tables from API',
-    );
+    console.log('Cache miss, fetching tables from API');
 
-    const terms = (await this.getTerminals()).id;
+    try {
+      const terms = (await this.getTerminals()).id;
 
-    const config = {
-      method: 'post',
-      url:
-        `${this.apiURL}/1/reserve/available_restaurant_sections`,
-      headers: {
-        ...this.defaultHeaders,
-        Authorization: `Bearer ${this.authToken}`,
-      },
-      data: JSON.stringify({
-        terminalGroupIds: [terms],
-      }),
-    };
+      const config = {
+        method: 'post',
+        url: `${this.apiURL}/1/reserve/available_restaurant_sections`,
+        headers: {
+          ...this.defaultHeaders,
+          Authorization: `Bearer ${this.authToken}`,
+        },
+        data: JSON.stringify({
+          terminalGroupIds: [terms],
+        }),
+      };
 
-    const response =
-      await this.makeAuthenticatedRequest(config);
+      const response = await this.makeAuthenticatedRequest(config);
+      const sections = response.data.restaurantSections;
 
-    const sections =
-      response.data.restaurantSections;
+      const terassa = sections.find(
+        ({ id }) => id === '40d52478-3cb8-4fa8-8813-3db688499db4',
+      );
 
-    const terassa = sections.find(
-      ({ id }) =>
-        id ===
-        '40d52478-3cb8-4fa8-8813-3db688499db4',
-    );
+      const rest = sections.find(
+        ({ id }) => id === '4577c29c-bcdb-4c63-84ca-ab1a256e0e54',
+      );
 
-    const rest = sections.find(
-      ({ id }) =>
-        id ===
-        '4577c29c-bcdb-4c63-84ca-ab1a256e0e54',
-    );
+      if (!terassa || !rest) {
+        throw new Error('Expected restaurant sections were not returned');
+      }
 
-    const result = [
-      {
-        name: terassa.name,
-        tables: terassa.tables
-          .filter(({ isDeleted }) => !isDeleted)
-          .map(({ id, number }) => {
-            return { id, number };
-          }),
-      },
-      {
-        name: rest.name,
-        tables: rest.tables
-          .filter(({ isDeleted }) => !isDeleted)
-          .map(({ id, number }) => {
-            return { id, number };
-          }),
-      },
-    ];
+      const result = [
+        {
+          name: terassa.name,
+          tables: terassa.tables
+            .filter(({ isDeleted }) => !isDeleted)
+            .map(({ id, number }) => {
+              return { id, number };
+            }),
+        },
+        {
+          name: rest.name,
+          tables: rest.tables
+            .filter(({ isDeleted }) => !isDeleted)
+            .map(({ id, number }) => {
+              return { id, number };
+            }),
+        },
+      ];
 
-    // Save the response to cache with TTL of 1 day
-    await this.cacheManager.set(
-      cacheKey,
-      result,
-      86400,
-    );
+      if (!result.some((section) => section.tables.length > 0)) {
+        throw new Error('iiko returned an empty table list');
+      }
 
-    console.log('Tables data cached for 1 day');
+      this.lastKnownTables = result;
 
-    return result;
+      try {
+        // cache-manager v7 expects TTL in milliseconds.
+        await this.cacheManager.set(cacheKey, result, 30 * 24 * 60 * 60 * 1000);
+        await this.cacheManager.set('tables:list:stale', result);
+        console.log('Tables data cached for 30 days');
+      } catch (error) {
+        console.error('Unable to write tables cache:', error.message);
+      }
+
+      return result;
+    } catch (error) {
+      console.error(
+        'Unable to fetch tables from iiko:',
+        error.response?.status || error.message,
+      );
+
+      const staleData = await this.getStaleTables();
+
+      if (staleData) {
+        return staleData;
+      }
+
+      throw error;
+    }
   }
 
   async getMenu() {
@@ -742,7 +812,7 @@ export class AppService {
           data[i].eventType + ':',
         );
 
-        await this.syncData();
+        this.scheduleSyncData();
       } else {
         /* TODO check order close */
 
@@ -846,6 +916,21 @@ export class AppService {
   }
 
   async syncData() {
+    if (this.syncDataPromise) {
+      console.log('Data sync already in progress');
+      return this.syncDataPromise;
+    }
+
+    this.syncDataPromise = this.performSyncData();
+
+    try {
+      return await this.syncDataPromise;
+    } finally {
+      this.syncDataPromise = null;
+    }
+  }
+
+  private async performSyncData() {
     const menu =
       await this.getMenu();
 
