@@ -5,6 +5,7 @@ import { Cache } from 'cache-manager';
 
 import axios from 'axios';
 import { TableOrder, MenuList, Config } from './entities';
+import { applyStopListToMenu } from './menu-stop-list';
 
 @Injectable()
 export class AppService {
@@ -47,7 +48,7 @@ export class AppService {
       'Content-Type': 'application/json',
     };
 
-    this.refreshTokenAndWebhookSettings()
+    this.auth()
       .then(() => this.syncData())
       .catch((error) => {
         console.error(
@@ -58,11 +59,12 @@ export class AppService {
 
     // iiko token lives for 1 hour.
     // Refresh a little earlier - every 55 minutes.
+    // Webhook settings belong to the API key and do not need to be updated.
     setInterval(
       () => {
-        this.refreshTokenAndWebhookSettings().catch((error) => {
+        this.auth().catch((error) => {
           console.error(
-            'Scheduled iiko auth or webhook update failed:',
+            'Scheduled iiko auth failed:',
             error.response?.data || error.message,
           );
         });
@@ -76,11 +78,6 @@ export class AppService {
       },
       1000 * 60 * 15,
     );
-  }
-
-  private async refreshTokenAndWebhookSettings() {
-    await this.auth();
-    await this.setWebhookSettings();
   }
 
   private scheduleSyncData(delay = this.WEBHOOK_SYNC_DELAY) {
@@ -934,34 +931,26 @@ export class AppService {
   }
 
   private async performSyncData() {
-    const menu =
-      await this.getMenu();
+    let menu: any;
 
-    const stopList =
-      (
-        await this.getStopListInfo()
-      )?.terminalGroupStopLists[0]
-        .items[0].items;
+    try {
+      menu = await this.getMenu();
+    } catch (error) {
+      menu = await this.getMenuLastData();
 
-    menu.products.forEach(
-      (item) => {
-        const product =
-          stopList.find(
-            (p) =>
-              p.productId ===
-              item.id,
-          );
+      if (!Array.isArray(menu?.products) || menu.products.length === 0) {
+        throw error;
+      }
 
-        if (product) {
-          item.isInStopList =
-            Boolean(
-              product.balance <= 0,
-            );
-        } else {
-          item.isInStopList =
-            false;
-        }
-      },
+      console.warn(
+        'Menu refresh failed; applying stop list to the last saved menu:',
+        error.response?.data || error.message,
+      );
+    }
+
+    menu = applyStopListToMenu(
+      menu,
+      await this.getStopListInfo(),
     );
 
     const menuItem =
