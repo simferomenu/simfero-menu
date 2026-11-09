@@ -6,6 +6,7 @@ import { Cache } from 'cache-manager';
 import axios from 'axios';
 import { TableOrder, MenuList, Config } from './entities';
 import { applyStopListToMenu } from './menu-stop-list';
+import { adaptExternalMenuV3 } from './menu-v3-adapter';
 
 @Injectable()
 export class AppService {
@@ -32,6 +33,8 @@ export class AppService {
 
   private readonly WEBHOOK_SYNC_DELAY = 60_000;
 
+  private readonly stopListsEnabled: boolean;
+
   constructor(
     private configService: ConfigService,
     @Inject(CACHE_MANAGER) private cacheManager: Cache,
@@ -43,6 +46,8 @@ export class AppService {
 
     this.apiURL = this.configService.get('API_PATH');
     this.webHookURL = this.configService.get('WEBHOOK');
+    this.stopListsEnabled =
+      this.configService.get<string>('STOP_LISTS_ENABLED', 'true') !== 'false';
 
     this.defaultHeaders = {
       'Content-Type': 'application/json',
@@ -397,29 +402,65 @@ export class AppService {
 
   async getMenu() {
     const org = (await this.getOrganizations())[0].id;
-
-    const config = {
-      method: 'post',
-
-      // Пока оставляем старый метод номенклатуры.
-      // На следующем этапе отдельно переведем меню на API v2.
-      url: `${this.apiURL}/1/nomenclature `,
-
-      headers: {
-        ...this.defaultHeaders,
-        Authorization: `Bearer ${this.authToken}`,
-        'Accept-Encoding': 'gzip, deflate',
-      },
-
-      data: JSON.stringify({
-        organizationId: org,
-      }),
+    const headers = {
+      ...this.defaultHeaders,
+      Authorization: `Bearer ${this.authToken}`,
+      'Accept-Encoding': 'gzip, deflate',
     };
 
-    const response =
-      await this.makeAuthenticatedRequest(config);
+    const menuListResponse = await this.makeAuthenticatedRequest({
+      method: 'post',
+      url: `${this.apiURL}/2/menu`,
+      headers,
+      data: JSON.stringify({
+        organizationIds: [org],
+      }),
+    });
 
-    return response.data;
+    const externalMenu = (menuListResponse.data.externalMenus || []).find(
+      (menu: any) =>
+        menu.name?.trim().toLocaleLowerCase('ru-RU') === 'симферо ресторан',
+    );
+
+    if (!externalMenu?.id) {
+      throw new Error('External menu "Симферо Ресторан" is not available');
+    }
+
+    const priceCategories = menuListResponse.data.priceCategories || [];
+    const priceCategory =
+      priceCategories.find(
+        (category: any) =>
+          category.name?.trim().toLocaleLowerCase('ru-RU') === 'ресторан',
+      ) ||
+      priceCategories.find(
+        (category: any) =>
+          category.name?.trim().toLocaleLowerCase('ru-RU') ===
+          'базовая категория',
+      ) ||
+      priceCategories[0];
+    const requestData: any = {
+      externalMenuId: externalMenu.id,
+      organizationId: org,
+    };
+
+    if (priceCategory?.id) {
+      requestData.priceCategoryId = priceCategory.id;
+    }
+
+    const response = await this.makeAuthenticatedRequest({
+      method: 'post',
+      url: `${this.apiURL}/menu/v3/by_id`,
+      headers,
+      data: JSON.stringify(requestData),
+    });
+    const previousMenu = await this.getMenuLastData();
+    const menu = adaptExternalMenuV3(response.data, previousMenu);
+
+    console.log(
+      `External menu "${externalMenu.name}" loaded: ${menu.products.length} products, ${menu.groups.length} groups`,
+    );
+
+    return menu;
   }
 
   async createOrder(data) {
@@ -943,14 +984,16 @@ export class AppService {
       }
 
       console.warn(
-        'Menu refresh failed; applying stop list to the last saved menu:',
+        'Menu refresh failed; using the last saved menu:',
         error.response?.data || error.message,
       );
     }
 
     menu = applyStopListToMenu(
       menu,
-      await this.getStopListInfo(),
+      this.stopListsEnabled
+        ? await this.getStopListInfo()
+        : { terminalGroupStopLists: [] },
     );
 
     const menuItem =
