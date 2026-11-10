@@ -81,7 +81,7 @@ export class AppService {
       () => {
         this.scheduleSyncData(0);
       },
-      1000 * 60 * 15,
+      1000 * 60 * 5,
     );
   }
 
