@@ -16,6 +16,19 @@ const REQUIRED_ROOT_GROUPS = [
 ];
 
 const ROOT_GROUP_DEFAULTS: Record<string, any> = {
+  'грибное меню': { order: 0 },
+  'арбузное меню': { order: 1 },
+  спаржа: { order: 2 },
+  'в крыму есть': { order: 3 },
+  'крымские вина': { order: 4 },
+  масленица: { order: 5 },
+  'рождественское меню': { order: 6 },
+  'деловые обеды': {
+    id: 'd595ef68-6cc8-45f8-9d7c-17d3e47df37d',
+    order: 7,
+  },
+  'симферо детям': { order: 8 },
+  торты: { order: 9 },
   'меню ресторана': {
     id: 'e32baf80-bacd-4f22-af1f-d1969a535566',
     order: 10,
@@ -35,10 +48,6 @@ const ROOT_GROUP_DEFAULTS: Record<string, any> = {
   'меню напитков': {
     id: 'f53b9025-673c-41ef-a1b3-02fddee5fbbc',
     order: 14,
-  },
-  'деловые обеды': {
-    id: 'd595ef68-6cc8-45f8-9d7c-17d3e47df37d',
-    order: 7,
   },
 };
 
@@ -351,14 +360,14 @@ export function adaptExternalMenuV3(externalMenu: any, previousMenu: any): any {
         ...makeGroup(
           externalGroup.name,
           oldGroup?.id || defaults?.id || externalGroup.id,
-          oldGroup?.order ?? defaults?.order ?? 0,
+          defaults?.order ?? oldGroup?.order ?? 0,
         ),
         ...oldGroup,
         id: oldGroup?.id || defaults?.id || externalGroup.id,
         name: oldGroup?.name || externalGroup.name,
         description: externalGroup.description ?? oldGroup?.description ?? null,
         tags: [],
-        order: oldGroup?.order ?? defaults?.order ?? 0,
+        order: defaults?.order ?? oldGroup?.order ?? 0,
         parentGroup: null,
         isDeleted: false,
         isGroupModifier: false,

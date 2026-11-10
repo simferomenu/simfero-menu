@@ -257,6 +257,43 @@ describe('adaptExternalMenuV3', () => {
     expect(result.products.find((p) => p.id === 'modifier-2').weight).toBe(0.02);
   });
 
+  it('restores the original root order after a temporary tag is removed', () => {
+    const result = adaptExternalMenuV3(
+      {
+        products: [product('dish')],
+        modifiers: [],
+        productCategories: [],
+        itemsGroups: [
+          {
+            id: 'new-kids',
+            name: 'СИМФЕРО ДЕТЯМ',
+            tags: [],
+            items: [
+              {
+                productId: 'dish',
+                name: 'Детское блюдо',
+                sizePrices: [size()],
+              },
+            ],
+          },
+        ],
+      },
+      previousMenu([
+        {
+          id: 'old-kids',
+          name: 'СИМФЕРО ДЕТЯМ',
+          parentGroup: 'root-kitchen',
+          order: 0,
+        },
+      ]),
+    );
+
+    expect(result.groups.find((g) => g.id === 'old-kids')).toMatchObject({
+      parentGroup: null,
+      order: 8,
+    });
+  });
+
   it('rejects an empty menu and unknown group tags', () => {
     expect(() => adaptExternalMenuV3({ itemsGroups: [] }, previousMenu())).toThrow(
       'empty or invalid',
